@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 TARGETS = ["dEa_kWh", "dEr_kvarh", "P_max_kW", "S_max_kVA"]
+VERSION = "2026-11-05c (ML on PCA-64, walk-forward SARIMAX)"
 
 
 # --------------------------------------------------------------------------- #
@@ -131,23 +132,32 @@ def run_ml(data, col: Collector):
     y_true = {m: inverse(data["Y"][data["masks"][m]], data["y_mean"], data["y_std"])
               for m in ("val", "test")}
 
+    # Feature compression for the boosted-tree / kernel family: 7,392 raw
+    # lags make single-output boosting prohibitively slow on Colab's 2 vCPUs
+    # (hours per model). PCA-64 keeps ~most of the variance and cuts the
+    # histogram cost by two orders of magnitude. RandomForest keeps the raw
+    # features (trained locally, no such constraint).
+    pca = PCA(n_components=64, random_state=42)
+    Ztr = pca.fit_transform(Xtr)
+    Zte = pca.transform(Xte)
+    print(f"PCA: {Xtr.shape[1]} -> 64 composantes "
+          f"({pca.explained_variance_ratio_.cumsum()[-1]:.1%} de variance conservée)")
+
     def split_out(p):
         return (inverse(p[:n_val], data["y_mean"], data["y_std"]),
                 inverse(p[n_val:], data["y_mean"], data["y_std"]))
 
-    # ---- XGBoost: one-output-per-tree per target (fast, in-process) --------
-    # 96 outputs x 100 rounds = 9,600 tiny trees per target; depth 6 halves
-    # the histogram depth. ~4-8 min per target on Colab's 2 vCPUs.
+    # ---- XGBoost: one-output-per-tree per target on PCA features -----------
     print("=== XGBoost ===")
     from xgboost import XGBRegressor
     t0 = time.time()
     preds, n_params = [], 0
     for k in range(4):
-        m = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=6,
-                         subsample=0.9, colsample_bytree=0.5, max_bin=256,
+        m = XGBRegressor(n_estimators=150, learning_rate=0.1, max_depth=6,
+                         subsample=0.9, colsample_bytree=0.8, max_bin=256,
                          tree_method="hist", n_jobs=2, random_state=42)
-        m.fit(Xtr, Ytr[:, k * 96:(k + 1) * 96])   # 96 outputs -> 96 trees/round
-        preds.append(m.predict(Xte))
+        m.fit(Ztr, Ytr[:, k * 96:(k + 1) * 96])   # 96 outputs -> 96 trees/round
+        preds.append(m.predict(Zte))
         try:
             tdf = m.get_booster().trees_to_dataframe()
             n_params += int(len(tdf[tdf["Feature"] != "Leaf"]))
@@ -158,7 +168,7 @@ def run_ml(data, col: Collector):
     pv, pt = split_out(np.concatenate(preds, axis=1).astype(np.float32))
     col.add("XGBoost", "Machine Learning", y_true, pv, pt, n_params, dt)
 
-    # ---- LightGBM: sequential per-target wrapper (n_jobs=1 -> in-process) --
+    # ---- LightGBM: sequential per-target wrapper on PCA features ----------
     print("=== LightGBM ===")
     from lightgbm import LGBMRegressor
     t0 = time.time()
@@ -168,8 +178,8 @@ def run_ml(data, col: Collector):
             n_estimators=300, learning_rate=0.08, num_leaves=63,
             subsample=0.9, colsample_bytree=0.8, n_jobs=2,
             random_state=42, verbose=-1), n_jobs=1)
-        wrap.fit(Xtr, Ytr[:, k * 96:(k + 1) * 96])
-        preds.append(wrap.predict(Xte))
+        wrap.fit(Ztr, Ytr[:, k * 96:(k + 1) * 96])
+        preds.append(wrap.predict(Zte))
         n_params += int(sum(b.booster_.num_trees() * b.booster_.num_model_per_iteration()
                             for b in wrap.estimators_))
         print(f"  LGBM target {k + 1}/4 done ({time.time() - t0:.0f}s cumulated)")
@@ -177,12 +187,10 @@ def run_ml(data, col: Collector):
     pv, pt = split_out(np.concatenate(preds, axis=1).astype(np.float32))
     col.add("LightGBM", "Machine Learning", y_true, pv, pt, n_params, dt)
 
-    # ---- SVR: PCA features + sequential wrapper ----------------------------
+    # ---- SVR: same PCA features, sequential wrapper -------------------------
     print("=== SVR ===")
     from sklearn.svm import SVR
     t0 = time.time()
-    pca = PCA(n_components=64, random_state=42)
-    Ztr, Zte = pca.fit_transform(Xtr), pca.transform(Xte)
     preds, n_sv = [], 0
     for k in range(4):
         wrap = MultiOutputRegressor(SVR(kernel="rbf", C=10.0, epsilon=0.01,
@@ -485,6 +493,7 @@ def main():
     want = {w.strip() for w in args.models.split(",")}
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"colab_benchmark version {VERSION}")
     print(f"device: {device}")
     data = load_data(args.data)
     col = Collector()
