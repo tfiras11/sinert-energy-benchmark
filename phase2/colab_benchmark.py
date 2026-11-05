@@ -136,16 +136,14 @@ def run_ml(data, col: Collector):
                 inverse(p[n_val:], data["y_mean"], data["y_std"]))
 
     # ---- XGBoost: one-output-per-tree per target (fast, in-process) --------
-    # multi_output_tree is experimentally slow here (split cost scales with
-    # n_outputs x n_features x n_bins -> minutes per node level on 2 vCPUs).
-    # The default strategy builds 96 tiny trees per boosting round: each
-    # single-output histogram is only a few MB and fits in milliseconds.
+    # 96 outputs x 100 rounds = 9,600 tiny trees per target; depth 6 halves
+    # the histogram depth. ~4-8 min per target on Colab's 2 vCPUs.
     print("=== XGBoost ===")
     from xgboost import XGBRegressor
     t0 = time.time()
     preds, n_params = [], 0
     for k in range(4):
-        m = XGBRegressor(n_estimators=200, learning_rate=0.08, max_depth=8,
+        m = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=6,
                          subsample=0.9, colsample_bytree=0.5, max_bin=256,
                          tree_method="hist", n_jobs=2, random_state=42)
         m.fit(Xtr, Ytr[:, k * 96:(k + 1) * 96])   # 96 outputs -> 96 trees/round
