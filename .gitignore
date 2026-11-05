@@ -1,0 +1,24 @@
+# ---- private data & derived artifacts (never commit) ----
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.npz
+*.npy
+*.pdf
+output/
+dataset/
+
+# ---- python ----
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+*.egg-info/
+.venv/
+venv/
+
+# ---- logs & OS ----
+*.log
+.DS_Store
+Thumbs.db
