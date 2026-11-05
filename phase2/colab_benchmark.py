@@ -98,9 +98,23 @@ class Collector:
               f"PDE_P={met['PDE_Pmax']:.2f}%")
 
     def save(self):
-        pd.DataFrame(self.rows).to_csv("colab_results.csv", index=False)
-        np.savez_compressed("colab_predictions.npz", **self.preds)
-        print("saved: colab_results.csv, colab_predictions.npz")
+        """Save cumulatively: merge with any previous partial run so results
+        accumulate across separate sessions (ml / sarimax / dl runs)."""
+        import os
+        old_rows, old_preds = [], {}
+        if os.path.exists("colab_results.csv"):
+            old_rows = pd.read_csv("colab_results.csv").to_dict("records")
+        if os.path.exists("colab_predictions.npz"):
+            old_preds = dict(np.load("colab_predictions.npz"))
+        new_names = {r["model"] for r in self.rows}
+        rows = [r for r in old_rows if r["model"] not in new_names] + self.rows
+        preds = {k: v for k, v in old_preds.items()
+                 if k.split("__")[0] not in new_names}
+        preds.update(self.preds)
+        pd.DataFrame(rows).to_csv("colab_results.csv", index=False)
+        np.savez_compressed("colab_predictions.npz", **preds)
+        print(f"saved: colab_results.csv ({len(rows)} models), "
+              f"colab_predictions.npz ({len(preds)} arrays)")
 
 
 # --------------------------------------------------------------------------- #
